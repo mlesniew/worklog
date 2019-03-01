@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+'''
+usage:
+    worklog [options] register [<timestamp>]
+    worklog [options] report
+    worklog [options] when
+
+options:
+    -f FILE --file=FILE     log filename [default: ~/.worklog.db]
+
+'''
+import datetime
+import os
+import sqlite3
+import subprocess
+import time
+
+from docopt import docopt
+from tabulate import tabulate
+
+
+def parse_timestamp(t):
+    return datetime.datetime.strptime(t, '%Y-%m-%dT%H:%M:%S')
+
+
+def main():
+    args = docopt(__doc__)
+
+    worklogfile = os.path.expanduser(args['--file'])
+
+    with sqlite3.connect(worklogfile) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS worklog (
+                day INTEGER UNIQUE NOT NULL,
+                start INTEGER NOT NULL,
+                end INTEGER NOT NULL
+            )''')
+        cursor = conn.cursor()
+
+        if args['register']:
+            if not args['<timestamp>']:
+                idletime = subprocess.check_output(['xprintidle'])
+                last_active = int(time.time() - int(idletime.strip()) // 1000)
+            else:
+                last_active = int(args['<timestamp>'])
+
+            activity_timestamp = datetime.datetime.fromtimestamp(last_active)
+            day = str(activity_timestamp.date())
+            tod = str(activity_timestamp.time().replace(microsecond=0))
+
+            conn.execute('''
+                INSERT OR REPLACE INTO
+                    worklog (day, start, end)
+                VALUES (
+                    ?,
+                    MIN(?, COALESCE((SELECT start FROM worklog WHERE day = ?), '99:99:99')),
+                    MAX(?, COALESCE((SELECT end FROM worklog WHERE day = ?), ''))
+                )
+            ''', (day, tod, day, tod, day))
+
+        elif args['when']:
+            now = datetime.datetime.now()
+            day = str(now.date())
+            tod = str(now.time().replace(microsecond=0))
+
+            cursor.execute('SELECT day || "T" || start FROM worklog WHERE day = ?', (day,))
+            row = cursor.fetchone()
+
+            if not row:
+                raise SystemExit('No activity registered today.')
+
+            first_today = parse_timestamp(row[0])
+            leave_today = first_today + datetime.timedelta(hours=8)
+
+            if leave_today >= now:
+                print(f'First activity today registered at {first_today.strftime("%H:%M")}, '
+                      f'you need to leave at {leave_today.strftime("%H:%M")}.')
+            else:
+                print(f'First activity today registered at {first_today.strftime("%H:%M")}, '
+                      f'you should have left at {leave_today.strftime("%H:%M")}.')
+
+        elif args['report']:
+            def iter_data():
+                cursor.execute('SELECT day, day || "T" || start, day || "T" || end FROM worklog ORDER BY day')
+                for row in cursor:
+                    day = row[0]
+                    start = parse_timestamp(row[1]).strftime("%H:%M")
+                    end = parse_timestamp(row[2]).strftime("%H:%M")
+                    yield day, start, end
+            print(tabulate(iter_data(), headers='date start end'.split()))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise SystemExit
